@@ -1,0 +1,33 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "C-Bus PC Interface",
+        "description": "Choose the serial port of your C-Bus PC Interface (5500PC, 5500PCU or 5500PACA). Stop any other software using it (cbus2mqtt, C-Gate) first.",
+        "data": {"port": "Serial port"}
+      }
+    },
+    "error": {"not_found": "That port does not exist."},
+    "abort": {"already_configured": "This C-Bus interface is already set up."}
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "C-Bus options",
+        "data": {
+          "project_file": "C-Bus Toolkit project (.cbz) or C-Gate tag file (.xml)",
+          "resync_minutes": "Re-read all levels every (minutes, 0 = off)",
+          "timesync": "Broadcast the time to the C-Bus network every 5 minutes"
+        },
+        "data_description": {
+          "project_file": "Optional. Full path, eg /config/myhouse.cbz. Group names are read from it."
+        }
+      }
+    },
+    "error": {"not_found": "File not found."}
+  },
+  "entity": {
+    "binary_sensor": {"connection": {"name": "Connection"}},
+    "button": {"resync": {"name": "Resync"}}
+  }
+}

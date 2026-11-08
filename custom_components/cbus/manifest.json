@@ -1,12 +1,17 @@
 {
   "domain": "cbus",
   "name": "C-Bus Lighting",
+  "after_dependencies": ["usb"],
   "codeowners": ["@a1fred0"],
-  "config_flow": false,
+  "config_flow": true,
   "documentation": "https://github.com/a1fred0/ha-cbus",
   "integration_type": "hub",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/a1fred0/ha-cbus/issues",
-  "requirements": [],
-  "version": "0.0.1"
+  "loggers": ["custom_components.cbus"],
+  "requirements": ["pyserial>=3.5"],
+  "usb": [
+    {"description": "*c-bus*"}
+  ],
+  "version": "0.1.0"
 }
