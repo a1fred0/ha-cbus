@@ -372,6 +372,12 @@ class _SerialPort:
         self._thread: threading.Thread | None = None
         self._closing = False
 
+    def set_lines(self, dtr: bool, rts: bool) -> None:
+        """Set the DTR / RTS handshake lines."""
+        if self._serial is not None:
+            self._serial.dtr = dtr
+            self._serial.rts = rts
+
     def set_baudrate(self, baudrate: int) -> None:
         """Change the port speed."""
         if self._serial is not None:
@@ -397,11 +403,6 @@ class _SerialPort:
             dsrdtr=False,
             xonxoff=False,
         )
-        try:
-            self._serial.dtr = True
-            self._serial.rts = True
-        except Exception:  # noqa: BLE001
-            pass
         try:
             _LOGGER.debug(
                 "Port %s open: baud=%s cts=%s dsr=%s cd=%s in_waiting=%s",
@@ -500,11 +501,18 @@ class CBusPCI:
         command_retries: int = 3,
         status_timeout: float = 4.0,
         port_factory: Callable[..., Any] | None = None,
-        baudrates: tuple[int, ...] = (9600, 19200, 38400, 4800),
+        baudrates: tuple[int, ...] = (9600,),
+        line_settings: tuple[tuple[bool, bool], ...] = (
+            (True, False),
+            (False, True),
+            (True, True),
+        ),
     ) -> None:
         self.port = port
         self._baudrates = list(baudrates)
+        self._line_settings = list(line_settings)
         self.baudrate: int | None = None
+        self.lines: tuple[bool, bool] | None = None
         self._on_lighting = on_lighting
         self._on_connected = on_connected
         self._on_disconnected = on_disconnected
@@ -628,28 +636,32 @@ class CBusPCI:
             candidates.remove(self.baudrate)
             candidates.insert(0, self.baudrate)
         results = []
+        combos = list(self._line_settings)
+        if self.lines in combos:
+            combos.remove(self.lines)
+            combos.insert(0, self.lines)
         for baud in candidates:
             if hasattr(self._serial, "set_baudrate"):
                 self._serial.set_baudrate(baud)
-            for strategy in ("burst", "wake"):
-                await self._send_init_sequence(strategy)
-                ok = await self._probe()
-                results.append(f"{baud}/{strategy}={'ok' if ok else 'no reply'}")
-                if ok:
-                    if self.baudrate != baud:
-                        _LOGGER.info(
-                            "C-Bus interface %s answering at %d baud (%s)",
-                            self.port,
-                            baud,
-                            strategy,
-                        )
-                    self.baudrate = baud
-                    self._last_init = self._loop.time()
-                    _LOGGER.info("C-Bus interface %s initialised", self.port)
-                    return
-                _LOGGER.debug(
-                    "No reply from %s at %d baud (%s)", self.port, baud, strategy
-                )
+            for lines in combos:
+                if hasattr(self._serial, "set_lines"):
+                    self._serial.set_lines(*lines)
+                for strategy in ("burst", "wake"):
+                    await self._send_init_sequence(strategy)
+                    ok = await self._probe()
+                    label = f"{baud}/dtr={int(lines[0])},rts={int(lines[1])}/{strategy}"
+                    results.append(f"{label}={'ok' if ok else 'no'}")
+                    if ok:
+                        if (self.baudrate, self.lines) != (baud, lines):
+                            _LOGGER.info(
+                                "C-Bus interface %s answering at %s", self.port, label
+                            )
+                        self.baudrate = baud
+                        self.lines = lines
+                        self._last_init = self._loop.time()
+                        _LOGGER.info("C-Bus interface %s initialised", self.port)
+                        return
+                    _LOGGER.debug("No reply from %s at %s", self.port, label)
             if len(candidates) == 1:
                 break
         raise CBusNotConnected(
@@ -845,6 +857,29 @@ class CBusPCI:
                 self._consecutive_failures = 0
                 self.force_reconnect()
         raise CBusCommandFailed(f"C-Bus did not confirm command {packet.hex()}")
+
+    # ---------------------------------------------------------- diagnostics
+    async def open_raw(self) -> None:
+        """Stop normal operation and open the port for raw diagnostics."""
+        await self.stop()
+        self._stopping = False
+        await self._open()
+
+    async def close_raw(self) -> None:
+        self._close()
+
+    def set_baudrate(self, baudrate: int) -> None:
+        if self._serial is not None and hasattr(self._serial, "set_baudrate"):
+            self._serial.set_baudrate(baudrate)
+
+    def write_raw(self, data: bytes) -> None:
+        """Write raw bytes to the port (diagnostics)."""
+        self._write(data)
+
+    def set_lines(self, dtr: bool, rts: bool) -> None:
+        """Set handshake lines (diagnostics)."""
+        if self._serial is not None and hasattr(self._serial, "set_lines"):
+            self._serial.set_lines(dtr, rts)
 
     # ------------------------------------------------------------ lighting
     async def lighting_on(self, group: int, application: int = APP_LIGHTING):
