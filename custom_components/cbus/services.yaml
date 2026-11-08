@@ -1,0 +1,27 @@
+reconnect:
+raw_open:
+raw_send:
+  fields:
+    data:
+      required: true
+      example: "~~~\\r"
+      selector:
+        text:
+raw_lines:
+  fields:
+    dtr:
+      required: true
+      selector:
+        boolean:
+    rts:
+      required: true
+      selector:
+        boolean:
+raw_baud:
+  fields:
+    baud:
+      required: true
+      selector:
+        number:
+          min: 1200
+          max: 115200
