@@ -500,7 +500,7 @@ class CBusPCI:
         command_retries: int = 3,
         status_timeout: float = 4.0,
         port_factory: Callable[..., Any] | None = None,
-        baudrates: tuple[int, ...] = (9600, 19200, 38400, 57600, 115200, 4800, 2400),
+        baudrates: tuple[int, ...] = (9600, 19200, 38400, 4800),
     ) -> None:
         self.port = port
         self._baudrates = list(baudrates)
@@ -631,30 +631,45 @@ class CBusPCI:
         for baud in candidates:
             if hasattr(self._serial, "set_baudrate"):
                 self._serial.set_baudrate(baud)
-            await self._send_init_sequence()
-            ok = await self._probe()
-            results.append(f"{baud}={'ok' if ok else 'no reply'}")
-            if ok:
-                if self.baudrate != baud:
-                    _LOGGER.info(
-                        "C-Bus interface %s answering at %d baud", self.port, baud
-                    )
-                self.baudrate = baud
-                self._last_init = self._loop.time()
-                _LOGGER.info("C-Bus interface %s initialised", self.port)
-                return
-            _LOGGER.debug("No reply from %s at %d baud", self.port, baud)
+            for strategy in ("burst", "wake"):
+                await self._send_init_sequence(strategy)
+                ok = await self._probe()
+                results.append(f"{baud}/{strategy}={'ok' if ok else 'no reply'}")
+                if ok:
+                    if self.baudrate != baud:
+                        _LOGGER.info(
+                            "C-Bus interface %s answering at %d baud (%s)",
+                            self.port,
+                            baud,
+                            strategy,
+                        )
+                    self.baudrate = baud
+                    self._last_init = self._loop.time()
+                    _LOGGER.info("C-Bus interface %s initialised", self.port)
+                    return
+                _LOGGER.debug(
+                    "No reply from %s at %d baud (%s)", self.port, baud, strategy
+                )
             if len(candidates) == 1:
                 break
         raise CBusNotConnected(
             "interface did not respond (" + ", ".join(results) + ")"
         )
 
-    async def _send_init_sequence(self) -> None:
-        for line in INIT_SEQUENCE:
-            self._write(line)
-            await asyncio.sleep(0.15)
-        await asyncio.sleep(0.5)
+    async def _send_init_sequence(self, strategy: str = "burst") -> None:
+        """Reset the interface into SMART mode.
+
+        The whole sequence is written in one go, as C-Gate and cmqttd do. A
+        Pascal Automation Controller (5500PACA) only switches from its own
+        programming protocol to PC Interface mode when it sees the reset
+        characters together; "wake" additionally gives it time to switch
+        before the configuration commands are sent.
+        """
+        if strategy == "wake":
+            self._write(b"~~~\r")
+            await asyncio.sleep(3.0)
+        self._write(b"".join(INIT_SEQUENCE))
+        await asyncio.sleep(1.0)
         # Anything received so far is echo from basic mode.
         self._buffer.clear()
 
