@@ -28,7 +28,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 import logging
-import os
+import threading
 from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
@@ -351,7 +351,11 @@ def decode_line(line: bytes) -> list:
 # Serial transport
 # --------------------------------------------------------------------------
 class _SerialPort:
-    """Minimal non-blocking serial port driven by the asyncio event loop."""
+    """Serial port with a background reader thread.
+
+    A thread doing blocking reads is used rather than event-loop fd polling:
+    it behaves the same on every platform and USB serial driver.
+    """
 
     def __init__(
         self,
@@ -365,7 +369,8 @@ class _SerialPort:
         self._on_data = on_data
         self._on_lost = on_lost
         self._serial: Any = None
-        self._fd: int | None = None
+        self._thread: threading.Thread | None = None
+        self._closing = False
 
     def open(self) -> None:
         """Open the port. Blocking - call from an executor."""
@@ -377,29 +382,53 @@ class _SerialPort:
             bytesize=8,
             parity="N",
             stopbits=1,
-            timeout=0,
+            timeout=0.1,
             write_timeout=2,
-            exclusive=True,
+            rtscts=False,
+            dsrdtr=False,
+            xonxoff=False,
         )
-        self._serial.reset_input_buffer()
+        try:
+            self._serial.dtr = True
+            self._serial.rts = True
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _LOGGER.debug(
+                "Port %s open: baud=%s cts=%s dsr=%s cd=%s in_waiting=%s",
+                self._port,
+                self._serial.baudrate,
+                self._serial.cts,
+                self._serial.dsr,
+                self._serial.cd,
+                self._serial.in_waiting,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def start_reading(self) -> None:
-        """Register with the event loop (call from the loop)."""
-        self._fd = self._serial.fileno()
-        self._loop.add_reader(self._fd, self._readable)
+        """Start the reader thread (call from the loop)."""
+        self._closing = False
+        self._thread = threading.Thread(
+            target=self._reader, name="cbus-serial-reader", daemon=True
+        )
+        self._thread.start()
 
-    def _readable(self) -> None:
-        try:
-            data = os.read(self._fd, 1024)
-        except OSError as err:
-            self._lost(err)
-            return
-        if not data:
-            self._lost(None)
-            return
-        self._on_data(data)
+    def _reader(self) -> None:
+        ser = self._serial
+        while not self._closing:
+            try:
+                data = ser.read(max(1, min(1024, ser.in_waiting)))
+            except Exception as err:  # noqa: BLE001
+                if not self._closing:
+                    self._loop.call_soon_threadsafe(self._lost, err)
+                return
+            if data:
+                self._loop.call_soon_threadsafe(self._on_data, data)
 
     def _lost(self, err: Exception | None) -> None:
+        if self._closing:
+            return
         self.close()
         self._on_lost(err)
 
@@ -408,17 +437,13 @@ class _SerialPort:
             raise CBusNotConnected
         try:
             self._serial.write(data)
+            self._serial.flush()
         except Exception as err:  # noqa: BLE001
             self._lost(err)
             raise CBusNotConnected from err
 
     def close(self) -> None:
-        if self._fd is not None:
-            try:
-                self._loop.remove_reader(self._fd)
-            except Exception:  # noqa: BLE001
-                pass
-            self._fd = None
+        self._closing = True
         if self._serial is not None:
             try:
                 self._serial.close()
@@ -623,6 +648,7 @@ class CBusPCI:
 
     # ------------------------------------------------------------- receive
     def _data_received(self, data: bytes) -> None:
+        _LOGGER.debug("RX %r", data)
         self._buffer += data
         buf = self._buffer
         while buf:
