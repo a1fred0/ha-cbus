@@ -372,6 +372,15 @@ class _SerialPort:
         self._thread: threading.Thread | None = None
         self._closing = False
 
+    def set_baudrate(self, baudrate: int) -> None:
+        """Change the port speed."""
+        if self._serial is not None:
+            self._serial.baudrate = baudrate
+            try:
+                self._serial.reset_input_buffer()
+            except Exception:  # noqa: BLE001
+                pass
+
     def open(self) -> None:
         """Open the port. Blocking - call from an executor."""
         import serial  # pylint: disable=import-outside-toplevel
@@ -491,8 +500,11 @@ class CBusPCI:
         command_retries: int = 3,
         status_timeout: float = 4.0,
         port_factory: Callable[..., Any] | None = None,
+        baudrates: tuple[int, ...] = (9600, 19200, 38400, 57600, 115200, 4800, 2400),
     ) -> None:
         self.port = port
+        self._baudrates = list(baudrates)
+        self.baudrate: int | None = None
         self._on_lighting = on_lighting
         self._on_connected = on_connected
         self._on_disconnected = on_disconnected
@@ -606,15 +618,62 @@ class CBusPCI:
         _LOGGER.debug("Opened %s", self.port)
 
     async def _initialise(self) -> None:
-        """Reset the PCI and put it into SMART mode."""
+        """Reset the PCI, put it into SMART mode and check it answers.
+
+        If the interface does not confirm a probe command, other serial speeds
+        are tried, and the one that works is remembered.
+        """
+        candidates = list(self._baudrates)
+        if self.baudrate in candidates:
+            candidates.remove(self.baudrate)
+            candidates.insert(0, self.baudrate)
+        results = []
+        for baud in candidates:
+            if hasattr(self._serial, "set_baudrate"):
+                self._serial.set_baudrate(baud)
+            await self._send_init_sequence()
+            ok = await self._probe()
+            results.append(f"{baud}={'ok' if ok else 'no reply'}")
+            if ok:
+                if self.baudrate != baud:
+                    _LOGGER.info(
+                        "C-Bus interface %s answering at %d baud", self.port, baud
+                    )
+                self.baudrate = baud
+                self._last_init = self._loop.time()
+                _LOGGER.info("C-Bus interface %s initialised", self.port)
+                return
+            _LOGGER.debug("No reply from %s at %d baud", self.port, baud)
+            if len(candidates) == 1:
+                break
+        raise CBusNotConnected(
+            "interface did not respond (" + ", ".join(results) + ")"
+        )
+
+    async def _send_init_sequence(self) -> None:
         for line in INIT_SEQUENCE:
             self._write(line)
             await asyncio.sleep(0.15)
         await asyncio.sleep(0.5)
         # Anything received so far is echo from basic mode.
         self._buffer.clear()
-        self._last_init = self._loop.time()
-        _LOGGER.info("C-Bus interface %s initialised", self.port)
+
+    async def _probe(self) -> bool:
+        """Send a harmless command and wait for its confirmation."""
+        packet = encode_point_to_multipoint(
+            APP_STATUS_REQUEST, status_request_sal(APP_LIGHTING, 0, level=False)
+        )
+        code = self._confirmation_code()
+        fut: asyncio.Future[bool] = self._loop.create_future()
+        self._pending[code] = fut
+        try:
+            self._write(b"\\" + b16encode(packet) + bytes([code]) + b"\r")
+            return await asyncio.wait_for(fut, 2.0)
+        except TimeoutError:
+            return False
+        finally:
+            self._pending.pop(code, None)
+            await asyncio.sleep(0.8)  # let any status reply drain
 
     def _close(self) -> None:
         if self._serial is not None:
