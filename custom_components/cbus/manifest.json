@@ -4,6 +4,10 @@
   "after_dependencies": [
     "usb"
   ],
+  "categories": [
+    "hubs_protocols.building_automation",
+    "lighting.lighting_systems"
+  ],
   "codeowners": [
     "@a1fred0"
   ],
@@ -17,9 +21,6 @@
   "issue_tracker": "https://github.com/a1fred0/ha-cbus/issues",
   "loggers": [
     "custom_components.cbus"
-  ],
-  "requirements": [
-    "pyserial>=3.5"
   ],
   "usb": [
     {
