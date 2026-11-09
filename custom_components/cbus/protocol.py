@@ -28,6 +28,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 import logging
+import queue
 import threading
 from typing import Any
 
@@ -505,22 +506,48 @@ class _SerialPort:
         self._on_lost = on_lost
         self._serial: Any = None
         self._thread: threading.Thread | None = None
+        self._writer: threading.Thread | None = None
+        self._tx: queue.SimpleQueue[Callable[[Any], None] | None] | None = None
         self._closing = False
+
+    def _submit(self, job: Callable[[Any], None]) -> None:
+        """Run a port operation on the writer thread, in order.
+
+        Writes (and line / speed changes, which must stay in order with them)
+        never run on the event loop: at 9600 baud, or with a blocking socket
+        for an Ethernet interface, they can take a noticeable time.
+        """
+        if self._serial is None:
+            raise CBusNotConnected
+        if self._tx is None:  # writer not started yet (port just opened)
+            job(self._serial)
+            return
+        self._tx.put(job)
 
     def set_lines(self, dtr: bool, rts: bool) -> None:
         """Set the DTR / RTS handshake lines."""
-        if self._serial is not None:
-            self._serial.dtr = dtr
-            self._serial.rts = rts
+        if self._serial is None:
+            return
+
+        def job(ser: Any) -> None:
+            ser.dtr = dtr
+            ser.rts = rts
+
+        self._submit(job)
 
     def set_baudrate(self, baudrate: int) -> None:
         """Change the port speed."""
-        if self._serial is not None:
-            self._serial.baudrate = baudrate
+        if self._serial is None:
+            return
+
+        def job(ser: Any) -> None:
+            ser.baudrate = baudrate
             try:
-                self._serial.reset_input_buffer()
+                ser.reset_input_buffer()
             except Exception:  # noqa: BLE001
                 pass
+
+        self._submit(job)
 
     def open(self) -> None:
         """Open the port. Blocking - call from an executor.
@@ -556,12 +583,32 @@ class _SerialPort:
             pass
 
     def start_reading(self) -> None:
-        """Start the reader thread (call from the loop)."""
+        """Start the reader and writer threads (call from the loop)."""
         self._closing = False
         self._thread = threading.Thread(
             target=self._reader, name="cbus-serial-reader", daemon=True
         )
         self._thread.start()
+        self._tx = queue.SimpleQueue()
+        self._writer = threading.Thread(
+            target=self._write_loop,
+            args=(self._serial, self._tx),
+            name="cbus-serial-writer",
+            daemon=True,
+        )
+        self._writer.start()
+
+    def _write_loop(self, ser: Any, tx: queue.SimpleQueue) -> None:
+        while True:
+            job = tx.get()
+            if job is None:
+                return
+            try:
+                job(ser)
+            except Exception as err:  # noqa: BLE001
+                if not self._closing:
+                    self._loop.call_soon_threadsafe(self._lost, err)
+                return
 
     def _reader(self) -> None:
         ser = self._serial
@@ -582,17 +629,19 @@ class _SerialPort:
         self._on_lost(err)
 
     def write(self, data: bytes) -> None:
-        if self._serial is None:
-            raise CBusNotConnected
-        try:
-            self._serial.write(data)
-            self._serial.flush()
-        except Exception as err:  # noqa: BLE001
-            self._lost(err)
-            raise CBusNotConnected from err
+        """Queue bytes for sending (doesn't block)."""
+
+        def job(ser: Any) -> None:
+            ser.write(data)
+            ser.flush()
+
+        self._submit(job)
 
     def close(self) -> None:
         self._closing = True
+        if self._tx is not None:
+            self._tx.put(None)
+            self._tx = None
         if self._serial is not None:
             try:
                 self._serial.close()
@@ -785,12 +834,12 @@ class CBusPCI:
 
     async def _wait_for_replug(self, timeout: float = 1800) -> None:
         """Wait until the USB device disappears and comes back (or timeout)."""
-        start = self._device_identity()
+        start = await self._loop.run_in_executor(None, self._device_identity)
         gone = False
         end = self._loop.time() + timeout
         while not self._stopping and self._loop.time() < end:
             await asyncio.sleep(2)
-            now = self._device_identity()
+            now = await self._loop.run_in_executor(None, self._device_identity)
             if now is None:
                 gone = True
             elif gone or now != start:
