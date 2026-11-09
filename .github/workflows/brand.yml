@@ -1,0 +1,30 @@
+name: Brand images
+
+# Brand images are committed base64-encoded (*.png.b64) by tools that can only
+# write text; this turns them into the PNG files Home Assistant reads.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "custom_components/cbus/brand/*.b64"
+
+permissions:
+  contents: write
+
+jobs:
+  decode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Decode and commit
+        run: |
+          cd custom_components/cbus/brand
+          for f in *.b64; do
+            base64 -d "$f" > "${f%.b64}"
+            git rm -q "$f"
+          done
+          git add -- *.png
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Brand images: decode from base64"
+          git push

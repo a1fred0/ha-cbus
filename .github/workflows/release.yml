@@ -1,0 +1,33 @@
+name: Release
+
+# When validation passes on main, publish a GitHub release for the version in
+# manifest.json if there isn't one yet. To release: bump "version" in
+# custom_components/cbus/manifest.json and push.
+on:
+  workflow_run:
+    workflows: [Validate]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Release the manifest version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          version=$(jq -r .version custom_components/cbus/manifest.json)
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "v$version is already released"
+            exit 0
+          fi
+          gh release create "v$version" --target "$SHA" --title "v$version" --generate-notes
