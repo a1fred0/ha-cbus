@@ -110,6 +110,19 @@ class CBusCommandFailed(CBusError):
     """The PCI did not confirm a command."""
 
 
+class CBusPacProgrammingMode(CBusError):
+    """A Pascal Automation Controller is answering in its programming protocol.
+
+    It only switches to PC Interface mode after its USB cable is unplugged and
+    plugged back in.
+    """
+
+
+# Reply a 5500PACA sends (in its PICED programming protocol) to anything it
+# does not understand: sync, 0xF0, length 0x0006, error 0xFE, checksum.
+PAC_PROGRAMMING_REPLY = b"\xff\xf0\x00\x06\xfe\x0b"
+
+
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
@@ -495,6 +508,7 @@ class CBusPCI:
         on_lighting: Callable[[LightingEvent], None] | None = None,
         on_connected: Callable[[], None] | None = None,
         on_disconnected: Callable[[], None] | None = None,
+        on_status: Callable[[], None] | None = None,
         timesync_interval: float = 300,
         answer_clock_requests: bool = True,
         command_timeout: float = 2.0,
@@ -516,6 +530,7 @@ class CBusPCI:
         self._on_lighting = on_lighting
         self._on_connected = on_connected
         self._on_disconnected = on_disconnected
+        self._on_status = on_status
         self._timesync_interval = timesync_interval
         self._answer_clock = answer_clock_requests
         self._command_timeout = command_timeout
@@ -540,6 +555,8 @@ class CBusPCI:
         self.last_error: str | None = None
         self.level_requests_supported: bool | None = None
         self._last_init = 0.0
+        self._raw_rx = b""
+        self.pac_programming_mode = False
 
     # ---------------------------------------------------------------- state
     @property
@@ -593,11 +610,23 @@ class CBusPCI:
                 await self._open()
                 await self._initialise()
                 self._consecutive_failures = 0
+                if self.pac_programming_mode:
+                    self.pac_programming_mode = False
+                    self._notify_status()
                 self._set_connected(True)
                 backoff = 2.0
                 await self._lost.wait()
             except asyncio.CancelledError:
                 raise
+            except CBusPacProgrammingMode as err:
+                self.last_error = str(err)
+                _LOGGER.error("C-Bus interface %s: %s", self.port, err)
+                self._close()
+                self._set_connected(False)
+                self._notify_status()
+                # Don't keep sending to the PAC; wait for it to be replugged.
+                await self._wait_for_replug()
+                continue
             except Exception as err:  # noqa: BLE001
                 self.last_error = str(err) or type(err).__name__
                 _LOGGER.warning(
@@ -614,9 +643,34 @@ class CBusPCI:
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60.0)
 
+    def _device_identity(self) -> tuple[str, int] | None:
+        import os  # pylint: disable=import-outside-toplevel
+
+        try:
+            real = os.path.realpath(self.port)
+            return real, os.stat(real).st_ino
+        except OSError:
+            return None
+
+    async def _wait_for_replug(self, timeout: float = 1800) -> None:
+        """Wait until the USB device disappears and comes back (or timeout)."""
+        start = self._device_identity()
+        gone = False
+        end = self._loop.time() + timeout
+        while not self._stopping and self._loop.time() < end:
+            await asyncio.sleep(2)
+            now = self._device_identity()
+            if now is None:
+                gone = True
+            elif gone or now != start:
+                _LOGGER.info("C-Bus interface %s was replugged", self.port)
+                await asyncio.sleep(3)  # let the PAC boot
+                return
+
     async def _open(self) -> None:
         self._lost.clear()
         self._buffer.clear()
+        self._raw_rx = b""
         port = self._port_factory(
             self._loop, self.port, self._data_received, self._connection_lost
         )
@@ -662,6 +716,12 @@ class CBusPCI:
                         _LOGGER.info("C-Bus interface %s initialised", self.port)
                         return
                     _LOGGER.debug("No reply from %s at %s", self.port, label)
+                    if PAC_PROGRAMMING_REPLY in self._raw_rx:
+                        self.pac_programming_mode = True
+                        raise CBusPacProgrammingMode(
+                            "the Pascal Automation Controller is in programming "
+                            "mode; unplug its USB cable and plug it back in"
+                        )
             if len(candidates) == 1:
                 break
         raise CBusNotConnected(
@@ -722,6 +782,13 @@ class CBusPCI:
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Error in connection callback")
 
+    def _notify_status(self) -> None:
+        if self._on_status:
+            try:
+                self._on_status()
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Error in status callback")
+
     def _connection_lost(self, err: Exception | None) -> None:
         self.last_error = str(err) if err else "connection closed"
         _LOGGER.warning("Lost connection to %s: %s", self.port, self.last_error)
@@ -735,6 +802,7 @@ class CBusPCI:
     # ------------------------------------------------------------- receive
     def _data_received(self, data: bytes) -> None:
         _LOGGER.debug("RX %r", data)
+        self._raw_rx = (self._raw_rx + data)[-64:]
         self._buffer += data
         buf = self._buffer
         while buf:
