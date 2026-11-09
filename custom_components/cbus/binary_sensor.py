@@ -63,5 +63,6 @@ class CBusConnectionSensor(BinarySensorEntity):
             "last_sync_ok": hub.last_sync_ok,
             "sync_count": hub.sync_count,
             "level_requests_supported": hub.pci.level_requests_supported,
-            "last_error": hub.pci.last_error,
+            # Only meaningful while disconnected; a cleared fault isn't shown.
+            "last_error": None if hub.pci.connected else hub.pci.last_error,
         }
