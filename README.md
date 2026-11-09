@@ -37,6 +37,25 @@ bridge or C-Gate needed.
 3. The interface is set up automatically. If not: Settings → Devices &
    services → Add integration → C-Bus Lighting, and pick the serial port.
 
+## Using a Pascal Automation Controller (5500PACA) as the interface
+A PAC can act as a PC Interface over its USB port, with two caveats:
+- **Its own logic program does not run** while it is acting as a PC Interface.
+- It switches into PC Interface mode only from a fresh start. If it is stuck
+  in its programming mode (it replies with binary `FF F0 00 06 FE 0B` frames),
+  only **unplugging and replugging its USB cable** fixes it. The integration
+  detects this, raises a repair notice, stops sending, and reconnects by
+  itself once the cable has been replugged.
+
+For a permanent installation, a dedicated 5500PCU (USB) or 5500CN (Ethernet)
+interface is better: it is always in PC Interface mode and the PAC keeps
+running its logic.
+
+## Diagnostic actions
+`cbus.reconnect`, `cbus.usb_reset`, `cbus.raw_open`, `cbus.raw_send`,
+`cbus.raw_lines`, `cbus.raw_baud`: low-level tools for troubleshooting the
+serial link (enable debug logging for `custom_components.cbus` to see the raw
+traffic).
+
 ## Going back to cbus2mqtt
 Remove the C-Bus Lighting integration, re-enable the old MQTT light entities
 (they were renamed to `light.<name>_cmqttd` and disabled), rename them back,
