@@ -4,6 +4,11 @@ Native Home Assistant integration for Clipsal C-Bus. It talks directly to a
 C-Bus PC Interface (5500PC, 5500PCU, 5500PACA) over USB serial, or to an
 Ethernet interface (5500CN). No MQTT bridge or C-Gate needed.
 
+**Maintenance:** this is maintained in spare time, on a best-effort basis.
+Bug reports with a debug log are welcome, and pull requests even more so.
+Features marked untested below depend on reports from people who have that
+hardware.
+
 ## What's tested and what isn't
 This was written for, and tested on, one real installation: a 5500PACA on USB,
 relay and dimmer channels, and Neo key units. Everything marked
