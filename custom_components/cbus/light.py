@@ -66,7 +66,6 @@ class CBusLight(LightEntity):
             name=hub.group_name(group),
             manufacturer="Clipsal",
             model="C-Bus lighting group",
-            via_device=hub.hub_identifier,
         )
         self._attr_extra_state_attributes = {
             "group_address": group,

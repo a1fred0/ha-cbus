@@ -4,11 +4,17 @@
       "user": {
         "title": "C-Bus PC Interface",
         "description": "Choose the serial port of your C-Bus PC Interface (5500PC, 5500PCU or 5500PACA). Stop any other software using it (cbus2mqtt, C-Gate) first.",
-        "data": {"port": "Serial port"}
+        "data": {
+          "port": "Serial port"
+        }
       }
     },
-    "error": {"not_found": "That port does not exist."},
-    "abort": {"already_configured": "This C-Bus interface is already set up."}
+    "error": {
+      "not_found": "That port does not exist."
+    },
+    "abort": {
+      "already_configured": "This C-Bus interface is already set up."
+    }
   },
   "options": {
     "step": {
@@ -24,10 +30,26 @@
         }
       }
     },
-    "error": {"not_found": "File not found."}
+    "error": {
+      "not_found": "File not found."
+    }
   },
   "entity": {
-    "binary_sensor": {"connection": {"name": "Connection"}},
-    "button": {"resync": {"name": "Resync"}}
+    "binary_sensor": {
+      "connection": {
+        "name": "Connection"
+      }
+    },
+    "button": {
+      "resync": {
+        "name": "Resync"
+      }
+    }
+  },
+  "issues": {
+    "pac_programming_mode": {
+      "title": "C-Bus PAC needs its USB cable replugged",
+      "description": "The Pascal Automation Controller (5500PACA) is answering in its programming protocol instead of acting as a PC Interface. It only switches modes when its USB cable is unplugged and plugged back in. Unplug the USB cable from the PAC (or from the Home Assistant computer), wait 10 seconds and plug it back in. C-Bus Lighting will reconnect automatically.\n\nNote: while a PAC is used as a PC Interface its own logic program does not run."
+    }
   }
 }
