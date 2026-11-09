@@ -8,7 +8,6 @@ from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import (
-    area_registry as ar,
     device_registry as dr,
     entity_registry as er,
 )
@@ -148,40 +147,22 @@ async def test_levels_fall_back_to_binary(hass: HomeAssistant, network):
     assert hub.pci.level_requests_supported is False
 
 
-async def test_takes_over_cbus2mqtt_entities(hass: HomeAssistant, network):
+async def test_leaves_other_integrations_entities_alone(
+    hass: HomeAssistant, network
+):
+    """cbus2mqtt's MQTT entities must not be renamed or disabled."""
     ent_reg = er.async_get(hass)
-    dev_reg = dr.async_get(hass)
-    area = ar.async_get(hass).async_create("Living Room")
     mqtt_entry = MockConfigEntry(domain="mqtt")
     mqtt_entry.add_to_hass(hass)
-    dev = dev_reg.async_get_or_create(
-        config_entry_id=mqtt_entry.entry_id,
-        identifiers={("mqtt", "cbus_light_1")},
-        name="C-Bus Light 001",
-    )
-    dev_reg.async_update_device(dev.id, name_by_user="Dining", area_id=area.id)
     old = ent_reg.async_get_or_create(
-        "light", "mqtt", "cbus_light_1", device_id=dev.id,
+        "light", "mqtt", "cbus_light_1",
         config_entry=mqtt_entry, suggested_object_id="dining",
     )
-    ent_reg.async_get_or_create(
-        "binary_sensor", "mqtt", "cbus_bin_sensor_1", device_id=dev.id,
-        config_entry=mqtt_entry,
-    )
-    assert old.entity_id == "light.dining"
-
     entry = await _setup(hass)
     await _wait(hass, lambda: entry.runtime_data.sync_count >= 1)
-
-    new = ent_reg.async_get("light.dining")
-    assert new.platform == DOMAIN
-    old_now = ent_reg.async_get("light.dining_cmqttd")
-    assert old_now.platform == "mqtt" and old_now.disabled_by is not None
-    bin_now = ent_reg.async_get_entity_id("binary_sensor", "mqtt", "cbus_bin_sensor_1")
-    assert ent_reg.async_get(bin_now).disabled_by is not None
-    new_dev = dev_reg.async_get(new.device_id)
-    assert new_dev.name == "Dining" and new_dev.area_id == area.id
-    assert hass.states.get("light.dining").state == STATE_ON
+    now = ent_reg.async_get(old.entity_id)
+    assert now.entity_id == "light.dining"
+    assert now.platform == "mqtt" and now.disabled_by is None
 
 
 async def test_project_file_names(hass: HomeAssistant, network, tmp_path):

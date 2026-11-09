@@ -67,9 +67,6 @@ whether it works, with a debug log if it doesn't.
   upload it under Configure → Settings.
 - **Automatic setup.** A C-Bus USB interface is detected and set up
   automatically.
-- **Takes over from cbus2mqtt.** On first run, names, areas and entity IDs of
-  existing cbus2mqtt (cmqttd) lights are moved over, and the old MQTT entities
-  are disabled. Automations keep working.
 - Answers network clock requests and (optionally) broadcasts the time every
   5 minutes, like cmqttd did.
 - Diagnostics: a *Connection* sensor (with last sync details) and a *Resync*
@@ -131,10 +128,10 @@ running its logic.
   `cbus.raw_send`, `cbus.raw_lines`, `cbus.raw_baud`. Enable debug logging for
   `custom_components.cbus` to see the raw traffic.
 
-## Going back to cbus2mqtt
-Remove the C-Bus integration, re-enable the old MQTT light entities (they were
-renamed to `light.<name>_cmqttd` and disabled), rename them back, and start the
-cbus2mqtt app.
+## Moving from cbus2mqtt
+The integration does not touch the old MQTT entities. After stopping the
+cbus2mqtt app, disable or delete its lights yourself (Settings → Entities). To
+keep automations working, give the new C-Bus lights the old entity IDs.
 
 ## Notes
 - Only lighting application 56 is used for lights, switches, blinds and fans.

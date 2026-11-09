@@ -84,10 +84,6 @@ EVENT_CBUS = "cbus_event"
 
 STORAGE_VERSION = 1
 
-# cbus2mqtt / cmqttd entities we can take over
-CMQTTD_LIGHT_UNIQUE_ID = "cbus_light_{}"
-CMQTTD_BINARY_SENSOR_UNIQUE_ID = "cbus_bin_sensor_{}"
-
 
 def signal_group(entry_id: str, group: int) -> str:
     """Dispatcher signal for a group's state changing."""
