@@ -3,9 +3,9 @@
     "step": {
       "user": {
         "title": "C-Bus PC Interface",
-        "description": "Choose the serial port of your C-Bus PC Interface (5500PC, 5500PCU or 5500PACA). Stop any other software using it (cbus2mqtt, C-Gate) first.",
+        "description": "Choose the serial port of your C-Bus PC Interface (5500PC, 5500PCU or 5500PACA), or type the address of an Ethernet interface (5500CN), eg tcp://192.168.1.50:10001. Stop any other software using it (cbus2mqtt, C-Gate) first.",
         "data": {
-          "port": "Serial port"
+          "port": "Serial port or network address"
         }
       }
     },
@@ -20,18 +20,35 @@
     "step": {
       "init": {
         "title": "C-Bus options",
+        "menu_options": {
+          "settings": "Settings and project file",
+          "group_types": "What each group controls (light, relay, blind, fan...)"
+        }
+      },
+      "settings": {
+        "title": "C-Bus settings",
         "data": {
-          "project_file": "C-Bus Toolkit project (.cbz) or C-Gate tag file (.xml)",
+          "project_upload": "Upload a C-Bus Toolkit project (.cbz) or C-Gate tag file (.xml)",
+          "project_file": "…or the path of one already on this system",
           "resync_minutes": "Re-read all levels every (minutes, 0 = off)",
           "timesync": "Broadcast the time to the C-Bus network every 5 minutes"
         },
         "data_description": {
-          "project_file": "Optional. Full path, eg /config/myhouse.cbz. Group names are read from it."
+          "project_upload": "Optional. Names of groups, wall switches, scenes and temperature sensors are read from it.",
+          "project_file": "Optional. Full path, eg /config/myhouse.cbz."
         }
+      },
+      "group_types": {
+        "title": "What each group controls",
+        "description": "Lights are dimmable by default. Choose \"On/off light\" for relay channels, \"Blind / curtain\" for shutter relays and \"Fan\" for fan controllers. Blinds, fans and switches are untested on real hardware: please report how they work for you."
       }
     },
     "error": {
-      "not_found": "File not found."
+      "not_found": "File not found.",
+      "invalid_project": "That file couldn't be read as a C-Bus project."
+    },
+    "abort": {
+      "no_groups": "No C-Bus groups have been found yet."
     }
   },
   "entity": {
@@ -44,12 +61,133 @@
       "resync": {
         "name": "Resync"
       }
+    },
+    "event": {
+      "unit": {
+        "name": "Presses",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "on": "On",
+              "off": "Off",
+              "ramp": "Dim / set level",
+              "terminate": "Dimming stopped",
+              "all_on": "All on",
+              "all_off": "All off",
+              "scene": "Scene"
+            }
+          }
+        }
+      }
     }
   },
   "issues": {
     "pac_programming_mode": {
-      "title": "C-Bus PAC needs its USB cable replugged",
-      "description": "The Pascal Automation Controller (5500PACA) is answering in its programming protocol instead of acting as a PC Interface. It only switches modes when its USB cable is unplugged and plugged back in. Unplug the USB cable from the PAC (or from the Home Assistant computer), wait 10 seconds and plug it back in. C-Bus Lighting will reconnect automatically.\n\nNote: while a PAC is used as a PC Interface its own logic program does not run."
+      "title": "C-Bus PAC needs restarting",
+      "description": "The Pascal Automation Controller (5500PACA) is answering in its programming protocol instead of acting as a PC Interface. It only switches modes from a fresh start: power-cycle the C-Bus network, or unplug the PAC's USB cable, wait 10 seconds and plug it back in. Resetting USB from Home Assistant isn't enough. C-Bus will reconnect automatically.\n\nNote: while a PAC is used as a PC Interface its own logic program does not run."
+    }
+  },
+  "selector": {
+    "group_type": {
+      "options": {
+        "light": "Dimmable light",
+        "light_onoff": "On/off light (relay)",
+        "switch": "Switch",
+        "cover": "Blind / curtain (shutter relay, untested)",
+        "fan": "Fan (fan controller, untested)"
+      }
+    }
+  },
+  "services": {
+    "reconnect": {
+      "name": "Reconnect",
+      "description": "Close and reopen the connection to the C-Bus interface."
+    },
+    "remove_group": {
+      "name": "Remove group",
+      "description": "Remove a group address and its entity. It isn't added back automatically, even if it's seen on the network.",
+      "fields": {
+        "group": {
+          "name": "Group address",
+          "description": "0-254"
+        }
+      }
+    },
+    "add_group": {
+      "name": "Add group",
+      "description": "Add a group address by hand (also undoes Remove group).",
+      "fields": {
+        "group": {
+          "name": "Group address",
+          "description": "0-254"
+        }
+      }
+    },
+    "trigger": {
+      "name": "Trigger scene",
+      "description": "Send a Trigger Control command (C-Bus scene). Untested on real hardware.",
+      "fields": {
+        "group": {
+          "name": "Trigger group",
+          "description": "0-254"
+        },
+        "action_selector": {
+          "name": "Action selector",
+          "description": "0-255"
+        }
+      }
+    },
+    "raw_open": {
+      "name": "Raw: open port",
+      "description": "Diagnostics: stop normal operation and open the port for raw commands."
+    },
+    "raw_send": {
+      "name": "Raw: send",
+      "description": "Diagnostics: send raw bytes (escapes like \\r allowed).",
+      "fields": {
+        "data": {
+          "name": "Data",
+          "description": "Text to send."
+        }
+      }
+    },
+    "raw_lines": {
+      "name": "Raw: set DTR/RTS",
+      "description": "Diagnostics: set the serial handshake lines.",
+      "fields": {
+        "dtr": {
+          "name": "DTR",
+          "description": "Data Terminal Ready"
+        },
+        "rts": {
+          "name": "RTS",
+          "description": "Request To Send"
+        }
+      }
+    },
+    "raw_baud": {
+      "name": "Raw: set speed",
+      "description": "Diagnostics: change the serial speed.",
+      "fields": {
+        "baud": {
+          "name": "Baud rate",
+          "description": "Serial speed"
+        }
+      }
+    },
+    "usb_reset": {
+      "name": "Reset USB device",
+      "description": "Diagnostics: reset the USB interface and reconnect.",
+      "fields": {
+        "method": {
+          "name": "Method",
+          "description": "ioctl or authorized"
+        },
+        "delay": {
+          "name": "Delay",
+          "description": "Seconds to wait before reconnecting"
+        }
+      }
     }
   }
 }

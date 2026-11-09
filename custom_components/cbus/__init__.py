@@ -12,7 +12,6 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from .const import DOMAIN
 from .hub import CBusHub
@@ -20,7 +19,16 @@ from .usb import usb_reset
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.LIGHT, Platform.BINARY_SENSOR, Platform.BUTTON]
+PLATFORMS: list[Platform] = [
+    Platform.BINARY_SENSOR,
+    Platform.BUTTON,
+    Platform.COVER,
+    Platform.EVENT,
+    Platform.FAN,
+    Platform.LIGHT,
+    Platform.SENSOR,
+    Platform.SWITCH,
+]
 
 type CBusConfigEntry = ConfigEntry[CBusHub]
 
@@ -68,22 +76,20 @@ def _register_services(hass: HomeAssistant) -> None:
         _hub(hass).pci.set_baudrate(call.data["baud"])
 
     async def remove_group(call: ServiceCall) -> None:
-        """Forget a group address and remove its light and device."""
+        """Forget a group address; it is not re-added automatically."""
         hub = _hub(hass)
         group: int = call.data["group"]
-        if group not in hub.groups:
-            raise HomeAssistantError(f"C-Bus group {group} is not known")
-        uid = hub.unique_id_for(group)
-        ent_reg = er.async_get(hass)
-        if entity_id := ent_reg.async_get_entity_id("light", DOMAIN, uid):
-            ent_reg.async_remove(entity_id)
-        dev_reg = dr.async_get(hass)
-        if device := dev_reg.async_get_device(identifiers={(DOMAIN, uid)}):
-            dev_reg.async_remove_device(device.id)
-        hub.groups.pop(group, None)
-        hub.levels.pop(group, None)
-        hub._save()  # noqa: SLF001
-        _LOGGER.info("Removed C-Bus group %d", group)
+        if group not in hub.groups and group in hub.ignored:
+            raise HomeAssistantError(f"C-Bus group {group} is already removed")
+        hub.async_remove_group(group)
+
+    async def add_group(call: ServiceCall) -> None:
+        """Add a group by hand (also undoes remove_group)."""
+        _hub(hass).async_add_group(call.data["group"])
+
+    async def trigger(call: ServiceCall) -> None:
+        """Send a Trigger Control (scene) command."""
+        await _hub(hass).async_trigger(call.data["group"], call.data["action_selector"])
 
     async def usb_reset_service(call: ServiceCall) -> None:
         hub = _hub(hass)
@@ -108,11 +114,23 @@ def _register_services(hass: HomeAssistant) -> None:
             }
         ),
     )
+    group_schema = vol.Schema(
+        {vol.Required("group"): vol.All(vol.Coerce(int), vol.Range(0, 254))}
+    )
+    hass.services.async_register(DOMAIN, "remove_group", remove_group, schema=group_schema)
+    hass.services.async_register(DOMAIN, "add_group", add_group, schema=group_schema)
     hass.services.async_register(
         DOMAIN,
-        "remove_group",
-        remove_group,
-        schema=vol.Schema({vol.Required("group"): vol.All(vol.Coerce(int), vol.Range(0, 254))}),
+        "trigger",
+        trigger,
+        schema=vol.Schema(
+            {
+                vol.Required("group"): vol.All(vol.Coerce(int), vol.Range(0, 254)),
+                vol.Required("action_selector"): vol.All(
+                    vol.Coerce(int), vol.Range(0, 255)
+                ),
+            }
+        ),
     )
     hass.services.async_register(DOMAIN, "reconnect", reconnect)
     hass.services.async_register(DOMAIN, "raw_open", raw_open)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 from typing import Any
 
 import voluptuous as vol
@@ -13,18 +14,32 @@ from homeassistant.config_entries import (
     ConfigFlowResult,
     OptionsFlow,
 )
-from homeassistant.core import callback
+from homeassistant.components.file_upload import process_uploaded_file
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.selector import (
+    FileSelector,
+    FileSelectorConfig,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 from homeassistant.helpers.service_info.usb import UsbServiceInfo
 
 from .const import (
+    CONF_GROUP_TYPES,
     CONF_PORT,
     CONF_PROJECT_FILE,
+    CONF_PROJECT_UPLOAD,
     CONF_RESYNC_MINUTES,
     CONF_TIMESYNC,
     DEFAULT_RESYNC_MINUTES,
     DEFAULT_TIMESYNC,
     DOMAIN,
+    GROUP_TYPES,
+    TYPE_LIGHT,
 )
+from .project import load_project
+from .protocol import is_network_port
 
 BY_ID_DIR = "/dev/serial/by-id"
 TITLE = "C-Bus"
@@ -92,7 +107,12 @@ class CBusConfigFlow(ConfigFlow, domain=DOMAIN):
         """Choose the serial port manually."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            path = user_input[CONF_PORT]
+            path = user_input[CONF_PORT].strip()
+            if is_network_port(path):
+                # An Ethernet interface (5500CN / CNI), eg tcp://192.168.1.50:10001
+                await self.async_set_unique_id(path)
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(title=TITLE, data={CONF_PORT: path})
             exists = await self.hass.async_add_executor_job(os.path.exists, path)
             if not exists:
                 errors[CONF_PORT] = "not_found"
@@ -106,15 +126,17 @@ class CBusConfigFlow(ConfigFlow, domain=DOMAIN):
 
         ports = await self.hass.async_add_executor_job(list_ports)
         default = next((p for p, d in ports.items() if "c-bus" in d.lower()), None)
-        if ports:
-            field = vol.In(ports)
-        else:
-            field = str
         schema = vol.Schema(
             {
                 vol.Required(
                     CONF_PORT, default=default or next(iter(ports), "/dev/ttyUSB0")
-                ): field
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[{"value": p, "label": d} for p, d in ports.items()],
+                        custom_value=True,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                )
             }
         )
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
@@ -125,28 +147,57 @@ class CBusConfigFlow(ConfigFlow, domain=DOMAIN):
         return CBusOptionsFlow()
 
 
+def save_uploaded_project(hass: HomeAssistant, file_id: str) -> str:
+    """Copy an uploaded project file into the config folder. Blocking."""
+    with process_uploaded_file(hass, file_id) as upload:
+        load_project(str(upload))  # raises if it can't be read
+        suffix = ".cbz" if upload.read_bytes()[:2] == b"PK" else ".xml"
+        target = Path(hass.config.path(DOMAIN, f"project{suffix}"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(upload, target)
+    return str(target)
+
+
 class CBusOptionsFlow(OptionsFlow):
-    """Options: project file, resync interval, time broadcasts."""
+    """Options: settings, and what each group controls."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        return self.async_show_menu(
+            step_id="init", menu_options=["settings", "group_types"]
+        )
+
+    async def async_step_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
+        options = dict(self.config_entry.options)
         if user_input is not None:
             project = (user_input.get(CONF_PROJECT_FILE) or "").strip()
-            if project:
+            if upload := user_input.pop(CONF_PROJECT_UPLOAD, None):
+                try:
+                    project = await self.hass.async_add_executor_job(
+                        save_uploaded_project, self.hass, upload
+                    )
+                except Exception:  # noqa: BLE001
+                    errors[CONF_PROJECT_UPLOAD] = "invalid_project"
+            elif project:
                 exists = await self.hass.async_add_executor_job(
                     os.path.isfile, project
                 )
                 if not exists:
                     errors[CONF_PROJECT_FILE] = "not_found"
             if not errors:
-                user_input[CONF_PROJECT_FILE] = project
-                return self.async_create_entry(data=user_input)
+                options.update(user_input)
+                options[CONF_PROJECT_FILE] = project
+                return self.async_create_entry(data=options)
 
-        options = self.config_entry.options
         schema = vol.Schema(
             {
+                vol.Optional(CONF_PROJECT_UPLOAD): FileSelector(
+                    FileSelectorConfig(accept=".cbz,.xml")
+                ),
                 vol.Optional(
                     CONF_PROJECT_FILE,
                     description={"suggested_value": options.get(CONF_PROJECT_FILE, "")},
@@ -161,4 +212,46 @@ class CBusOptionsFlow(OptionsFlow):
                 ): bool,
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
+        return self.async_show_form(
+            step_id="settings", data_schema=schema, errors=errors
+        )
+
+    async def async_step_group_types(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose what each group controls: light, relay, switch, blind or fan."""
+        options = dict(self.config_entry.options)
+        current: dict[str, str] = dict(options.get(CONF_GROUP_TYPES) or {})
+        hub = getattr(self.config_entry, "runtime_data", None)
+        groups: dict[int, str] = {}
+        if hub is not None:
+            groups = {ga: hub.group_name(ga) for ga in sorted(hub.groups)}
+        for ga in current:
+            groups.setdefault(int(ga), f"C-Bus Group {ga}")
+        labels = {f"{ga}: {name}": ga for ga, name in sorted(groups.items())}
+
+        if user_input is not None:
+            types = {
+                str(labels[label]): kind
+                for label, kind in user_input.items()
+                if label in labels and kind != TYPE_LIGHT
+            }
+            options[CONF_GROUP_TYPES] = types
+            return self.async_create_entry(data=options)
+
+        if not labels:
+            return self.async_abort(reason="no_groups")
+        selector = SelectSelector(
+            SelectSelectorConfig(
+                options=list(GROUP_TYPES),
+                translation_key="group_type",
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        )
+        schema = vol.Schema(
+            {
+                vol.Required(label, default=current.get(str(ga), TYPE_LIGHT)): selector
+                for label, ga in labels.items()
+            }
+        )
+        return self.async_show_form(step_id="group_types", data_schema=schema)

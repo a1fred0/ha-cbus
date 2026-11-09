@@ -6,6 +6,28 @@ remove_group:
         number:
           min: 0
           max: 254
+add_group:
+  fields:
+    group:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 254
+trigger:
+  fields:
+    group:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 254
+    action_selector:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 255
 reconnect:
 raw_open:
 raw_send:
