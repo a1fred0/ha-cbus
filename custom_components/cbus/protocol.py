@@ -35,13 +35,27 @@ _LOGGER = logging.getLogger(__name__)
 
 # --- Applications ---------------------------------------------------------
 APP_LIGHTING = 0x38
+APP_TEMPERATURE = 0x19
+APP_TRIGGER = 0xCA
+APP_MEASUREMENT = 0xE4
 APP_CLOCK = 0xDF
 APP_STATUS_REQUEST = 0xFF
+LIGHTING_APPLICATIONS = range(0x30, 0x60)
 
 # --- Lighting commands ----------------------------------------------------
 CMD_OFF = 0x01
 CMD_ON = 0x79
 CMD_TERMINATE_RAMP = 0x09
+
+# --- Trigger Control commands (same layout as lighting) -------------------
+TRIGGER_MIN = 0x01  # action selector 0
+TRIGGER_MAX = 0x79  # action selector 255
+TRIGGER_EVENT = 0x02  # group, action selector
+TRIGGER_INDICATOR_KILL = 0x09
+
+# --- Temperature Broadcast / Measurement ----------------------------------
+TEMPERATURE_BROADCAST = 0x02  # group, temperature * 4
+MEASUREMENT_EVENT = 0x0E  # device, channel, unit, exponent, value (int16)
 
 # Ramp command codes and their durations in seconds.
 RAMP_RATES: tuple[tuple[int, int], ...] = (
@@ -189,6 +203,14 @@ def status_request_sal(application: int, block: int, level: bool) -> bytes:
     return bytes([0x7A, application, block])
 
 
+def trigger_sal(group: int, action_selector: int) -> bytes:
+    """Build a Trigger Control SAL."""
+    if not 0 <= group <= 254:
+        raise ValueError(f"trigger group out of range: {group}")
+    action_selector = max(0, min(255, int(action_selector)))
+    return bytes([TRIGGER_EVENT, group, action_selector])
+
+
 def clock_sals(when: datetime) -> bytes:
     """Build clock application SALs for time and date."""
     time_sal = bytes([0x0D, 0x01, when.hour, when.minute, when.second, 0xFF])
@@ -238,6 +260,36 @@ class ClockRequest:
     source: int | None
 
 
+@dataclass(frozen=True)
+class TriggerEvent:
+    """A Trigger Control (scene) command seen on the network."""
+
+    source: int | None
+    group: int
+    action_selector: int | None  # None for "indicator kill"
+    action: str = "trigger"  # "trigger" or "indicator_kill"
+
+
+@dataclass(frozen=True)
+class TemperatureReading:
+    """A Temperature Broadcast application reading."""
+
+    source: int | None
+    group: int
+    celsius: float
+
+
+@dataclass(frozen=True)
+class MeasurementReading:
+    """A Measurement application reading."""
+
+    source: int | None
+    device: int
+    channel: int
+    unit_code: int
+    value: float
+
+
 def _decode_lighting_sals(source: int | None, app: int, data: bytes) -> list:
     out: list[LightingEvent] = []
     i = 0
@@ -270,6 +322,58 @@ def _decode_lighting_sals(source: int | None, app: int, data: bytes) -> list:
                 )
             )
         i += 1 + length
+    return out
+
+
+def _iter_sals(data: bytes):
+    """Yield (command, args) for short-form SALs; skip long-form ones."""
+    i = 0
+    while i < len(data):
+        cmd = data[i]
+        if cmd >= 0x80:
+            # long form (labels etc): length in low 5 bits, after the group
+            i += 2 + (cmd & 0x1F)
+            continue
+        length = cmd & 0x07
+        if length < 1 or i + 1 + length > len(data):
+            return
+        yield cmd, data[i + 1 : i + 1 + length]
+        i += 1 + length
+
+
+def _decode_trigger_sals(source: int | None, data: bytes) -> list:
+    out: list[TriggerEvent] = []
+    for cmd, args in _iter_sals(data):
+        group = args[0]
+        if cmd == TRIGGER_EVENT and len(args) == 2:
+            out.append(TriggerEvent(source, group, args[1]))
+        elif cmd == TRIGGER_MIN:
+            out.append(TriggerEvent(source, group, 0))
+        elif cmd == TRIGGER_MAX:
+            out.append(TriggerEvent(source, group, 255))
+        elif cmd == TRIGGER_INDICATOR_KILL:
+            out.append(TriggerEvent(source, group, None, "indicator_kill"))
+    return out
+
+
+def _decode_temperature_sals(source: int | None, data: bytes) -> list:
+    out: list[TemperatureReading] = []
+    for cmd, args in _iter_sals(data):
+        if cmd == TEMPERATURE_BROADCAST and len(args) == 2:
+            out.append(TemperatureReading(source, args[0], args[1] / 4))
+    return out
+
+
+def _decode_measurement_sals(source: int | None, data: bytes) -> list:
+    out: list[MeasurementReading] = []
+    for cmd, args in _iter_sals(data):
+        if cmd == MEASUREMENT_EVENT and len(args) == 6:
+            device, channel, unit_code, exponent = args[0], args[1], args[2], args[3]
+            if exponent >= 0x80:
+                exponent -= 0x100
+            raw = int.from_bytes(args[4:6], "big", signed=True)
+            value = round(raw * 10.0**exponent, 6)
+            out.append(MeasurementReading(source, device, channel, unit_code, value))
     return out
 
 
@@ -348,8 +452,14 @@ def decode_line(line: bytes) -> list:
         if routing != 0:
             return []
         sals = raw[4:]
-        if 0x30 <= app <= 0x5F:
+        if app in LIGHTING_APPLICATIONS:
             return _decode_lighting_sals(source, app, sals)
+        if app == APP_TRIGGER:
+            return _decode_trigger_sals(source, sals)
+        if app == APP_TEMPERATURE:
+            return _decode_temperature_sals(source, sals)
+        if app == APP_MEASUREMENT:
+            return _decode_measurement_sals(source, sals)
         if app == APP_CLOCK:
             return _decode_clock_sals(source, sals)
         return []
@@ -363,6 +473,18 @@ def decode_line(line: bytes) -> list:
 # --------------------------------------------------------------------------
 # Serial transport
 # --------------------------------------------------------------------------
+def is_network_port(port: str) -> bool:
+    """Whether a port is a network address rather than a serial device."""
+    return "://" in port
+
+
+def to_serial_url(port: str) -> str:
+    """Turn tcp://host:port (or host:port) into a pyserial URL."""
+    if port.startswith("tcp://"):
+        return "socket://" + port[len("tcp://") :]
+    return port
+
+
 class _SerialPort:
     """Serial port with a background reader thread.
 
@@ -401,11 +523,15 @@ class _SerialPort:
                 pass
 
     def open(self) -> None:
-        """Open the port. Blocking - call from an executor."""
+        """Open the port. Blocking - call from an executor.
+
+        ``self._port`` is a device path, or a URL such as
+        ``socket://192.168.1.50:10001`` for an Ethernet interface (5500CN).
+        """
         import serial  # pylint: disable=import-outside-toplevel
 
-        self._serial = serial.Serial(
-            self._port,
+        self._serial = serial.serial_for_url(
+            to_serial_url(self._port),
             baudrate=9600,
             bytesize=8,
             parity="N",
@@ -509,6 +635,7 @@ class CBusPCI:
         on_connected: Callable[[], None] | None = None,
         on_disconnected: Callable[[], None] | None = None,
         on_status: Callable[[], None] | None = None,
+        on_packet: Callable[[list], None] | None = None,
         timesync_interval: float = 300,
         answer_clock_requests: bool = True,
         command_timeout: float = 2.0,
@@ -531,12 +658,16 @@ class CBusPCI:
         self._on_connected = on_connected
         self._on_disconnected = on_disconnected
         self._on_status = on_status
+        self._on_packet = on_packet
         self._timesync_interval = timesync_interval
         self._answer_clock = answer_clock_requests
         self._command_timeout = command_timeout
         self._command_retries = command_retries
         self._status_timeout = status_timeout
         self._port_factory = port_factory or _SerialPort
+        if is_network_port(port):
+            # DTR / RTS mean nothing on a network connection.
+            self._line_settings = [self._line_settings[0]]
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._serial: Any = None
@@ -870,6 +1001,11 @@ class CBusPCI:
                     collector.add(msg)
             elif isinstance(msg, ClockRequest) and self._answer_clock:
                 self._spawn(self.send_time())
+        if messages and self._on_packet:
+            try:
+                self._on_packet(messages)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Error handling packet")
 
     async def _reinitialise(self) -> None:
         if not self._connected:
@@ -981,6 +1117,13 @@ class CBusPCI:
             encode_point_to_multipoint(
                 application, lighting_sal(CMD_TERMINATE_RAMP, group)
             )
+        )
+
+    # ------------------------------------------------------------- triggers
+    async def trigger(self, group: int, action_selector: int) -> None:
+        """Send a Trigger Control (scene) command."""
+        await self.send_packet(
+            encode_point_to_multipoint(APP_TRIGGER, trigger_sal(group, action_selector))
         )
 
     # -------------------------------------------------------------- status
