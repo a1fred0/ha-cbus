@@ -25,3 +25,14 @@ raw_baud:
         number:
           min: 1200
           max: 115200
+usb_reset:
+  fields:
+    method:
+      selector:
+        select:
+          options: ["ioctl", "authorized"]
+    delay:
+      selector:
+        number:
+          min: 0
+          max: 60

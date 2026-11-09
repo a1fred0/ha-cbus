@@ -1,6 +1,7 @@
 """C-Bus Lighting: native Home Assistant integration for Clipsal C-Bus."""
 from __future__ import annotations
 
+import asyncio
 import codecs
 import logging
 
@@ -14,6 +15,7 @@ import homeassistant.helpers.config_validation as cv
 
 from .const import DOMAIN
 from .hub import CBusHub
+from .usb import usb_reset
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,6 +66,29 @@ def _register_services(hass: HomeAssistant) -> None:
     async def raw_baud(call: ServiceCall) -> None:
         _hub(hass).pci.set_baudrate(call.data["baud"])
 
+    async def usb_reset_service(call: ServiceCall) -> None:
+        hub = _hub(hass)
+        method = call.data.get("method", "ioctl")
+        await hub.pci.stop()
+        try:
+            result = await hass.async_add_executor_job(usb_reset, hub.port, method)
+            _LOGGER.warning("USB reset: %s", result)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("USB reset (%s) failed: %r", method, err)
+        await asyncio.sleep(call.data.get("delay", 5))
+        await hub.pci.start()
+
+    hass.services.async_register(
+        DOMAIN,
+        "usb_reset",
+        usb_reset_service,
+        schema=vol.Schema(
+            {
+                vol.Optional("method", default="ioctl"): vol.In(["ioctl", "authorized"]),
+                vol.Optional("delay", default=5): vol.Coerce(float),
+            }
+        ),
+    )
     hass.services.async_register(DOMAIN, "reconnect", reconnect)
     hass.services.async_register(DOMAIN, "raw_open", raw_open)
     hass.services.async_register(
