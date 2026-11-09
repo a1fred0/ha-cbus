@@ -69,6 +69,57 @@ def test_network_port_url():
     assert open_url.call_args[0][0] == "socket://10.0.0.5:10001"
 
 
+async def test_serial_writes_off_event_loop():
+    """Writes (and line/speed changes) run on the writer thread, in order."""
+    import asyncio
+    import threading
+
+    loop = asyncio.get_running_loop()
+    done = threading.Event()
+    calls = []
+
+    class Ser:
+        in_waiting = 0
+
+        def read(self, n):
+            done.wait(0.05)
+            return b""
+
+        def write(self, data):
+            calls.append(("write", data, threading.current_thread().name))
+
+        def flush(self):
+            calls.append(("flush", None, threading.current_thread().name))
+
+        def reset_input_buffer(self):
+            pass
+
+        def __setattr__(self, name, value):
+            calls.append((name, value, threading.current_thread().name))
+
+        def close(self):
+            pass
+
+    with patch("serial.serial_for_url", return_value=Ser()):
+        port = _SerialPort(loop, "/dev/ttyUSB0", MagicMock(), MagicMock())
+        port.open()
+    port.start_reading()
+    port.set_baudrate(4800)
+    port.set_lines(True, False)
+    port.write(b"abc")
+    for _ in range(100):
+        if len(calls) >= 5:
+            break
+        await asyncio.sleep(0.01)
+    done.set()
+    port.close()
+    assert [c[:2] for c in calls] == [
+        ("baudrate", 4800), ("dtr", True), ("rts", False),
+        ("write", b"abc"), ("flush", None),
+    ]
+    assert {c[2] for c in calls} == {"cbus-serial-writer"}
+
+
 # --------------------------------------------------------- switch events
 async def test_switch_all_off_event(hass: HomeAssistant, network):
     entry = await _setup(hass)
