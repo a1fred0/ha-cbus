@@ -21,8 +21,6 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    CMQTTD_BINARY_SENSOR_UNIQUE_ID,
-    CMQTTD_LIGHT_UNIQUE_ID,
     CONF_GROUP_TYPES,
     CONF_PORT,
     COVER_COMMAND_LEVELS,
@@ -136,7 +134,7 @@ class CBusHub:
 
     # ------------------------------------------------------------ lifecycle
     async def async_setup(self) -> None:
-        """Load saved state, migrate old entities and start connecting."""
+        """Load saved state and start connecting."""
         self._data = await self._store.async_load() or {}
         for ga, info in self._data.get("groups", {}).items():
             self.groups[int(ga)] = dict(info)
@@ -185,9 +183,6 @@ class CBusHub:
 
         self._register_hub_device()
         self._remove_stale_group_entities()
-        if not self._data.get("migrated_cmqttd"):
-            self._migrate_from_cmqttd()
-            self._data["migrated_cmqttd"] = True
         self._save()
 
         await self.pci.start()
@@ -286,75 +281,6 @@ class CBusHub:
         if info and info.get("name"):
             return info["name"]
         return f"C-Bus Group {group}"
-
-    # ------------------------------------------------------------ migration
-    def _migrate_from_cmqttd(self) -> None:
-        """Take over names, areas and entity IDs from cbus2mqtt (cmqttd)."""
-        ent_reg = er.async_get(self.hass)
-        dev_reg = dr.async_get(self.hass)
-        migrated = []
-        for ga in range(255):
-            old_id = ent_reg.async_get_entity_id(
-                "light", "mqtt", CMQTTD_LIGHT_UNIQUE_ID.format(ga)
-            )
-            if not old_id:
-                continue
-            old = ent_reg.async_get(old_id)
-            if old is None or old.disabled_by is not None:
-                continue
-            new_uid = self.unique_id_for(ga)
-            if ent_reg.async_get_entity_id("light", DOMAIN, new_uid):
-                continue
-            device = dev_reg.async_get(old.device_id) if old.device_id else None
-            name = (
-                (device.name_by_user if device else None)
-                or old.name
-                or (device.name if device else None)
-                or old.original_name
-                or f"C-Bus Group {ga}"
-            )
-            area = old.area_id or (device.area_id if device else None)
-
-            # Move the old entity out of the way and disable it.
-            ent_reg.async_update_entity(
-                old_id,
-                new_entity_id=f"{old_id}_cmqttd",
-                disabled_by=er.RegistryEntryDisabler.INTEGRATION,
-            )
-            old_bin = ent_reg.async_get_entity_id(
-                "binary_sensor", "mqtt", CMQTTD_BINARY_SENSOR_UNIQUE_ID.format(ga)
-            )
-            if old_bin and ent_reg.async_get(old_bin).disabled_by is None:
-                ent_reg.async_update_entity(
-                    old_bin, disabled_by=er.RegistryEntryDisabler.INTEGRATION
-                )
-
-            new_device = dev_reg.async_get_or_create(
-                config_entry_id=self.entry.entry_id,
-                identifiers={(DOMAIN, new_uid)},
-                name=name,
-                manufacturer="Clipsal",
-                model="C-Bus lighting group",
-            )
-            if area:
-                dev_reg.async_update_device(new_device.id, area_id=area)
-            entry = ent_reg.async_get_or_create(
-                "light",
-                DOMAIN,
-                new_uid,
-                config_entry=self.entry,
-                device_id=new_device.id,
-            )
-            if entry.entity_id != old_id:
-                ent_reg.async_update_entity(entry.entity_id, new_entity_id=old_id)
-            self.groups[ga] = {"name": name, "source": "migrated"}
-            migrated.append(f"{ga}={old_id}")
-        if migrated:
-            _LOGGER.info(
-                "Took over %d lights from cbus2mqtt: %s",
-                len(migrated),
-                ", ".join(migrated),
-            )
 
     # --------------------------------------------------------------- groups
     @callback
