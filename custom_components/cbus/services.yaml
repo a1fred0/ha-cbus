@@ -1,3 +1,11 @@
+remove_group:
+  fields:
+    group:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 254
 reconnect:
 raw_open:
 raw_send:

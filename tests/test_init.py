@@ -232,3 +232,18 @@ async def test_unload(hass: HomeAssistant, network):
     await _wait(hass, lambda: entry.runtime_data.sync_count >= 1)
     assert await hass.config_entries.async_unload(entry.entry_id)
     assert network.port.closed
+
+
+async def test_remove_group(hass: HomeAssistant, network):
+    entry = await _setup(hass)
+    hub = entry.runtime_data
+    await _wait(hass, lambda: hub.sync_count >= 1)
+    eid = _light_ids(hass)[5]
+    await hass.services.async_call(DOMAIN, "remove_group", {"group": 5}, blocking=True)
+    await hass.async_block_till_done()
+    assert 5 not in _light_ids(hass)
+    assert 5 not in hub.groups
+    assert hass.states.get(eid) is None
+    assert dr.async_get(hass).async_get_device(
+        identifiers={(DOMAIN, "001004113837_56_5")}
+    ) is None

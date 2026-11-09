@@ -12,6 +12,7 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from .const import DOMAIN
 from .hub import CBusHub
@@ -66,6 +67,24 @@ def _register_services(hass: HomeAssistant) -> None:
     async def raw_baud(call: ServiceCall) -> None:
         _hub(hass).pci.set_baudrate(call.data["baud"])
 
+    async def remove_group(call: ServiceCall) -> None:
+        """Forget a group address and remove its light and device."""
+        hub = _hub(hass)
+        group: int = call.data["group"]
+        if group not in hub.groups:
+            raise HomeAssistantError(f"C-Bus group {group} is not known")
+        uid = hub.unique_id_for(group)
+        ent_reg = er.async_get(hass)
+        if entity_id := ent_reg.async_get_entity_id("light", DOMAIN, uid):
+            ent_reg.async_remove(entity_id)
+        dev_reg = dr.async_get(hass)
+        if device := dev_reg.async_get_device(identifiers={(DOMAIN, uid)}):
+            dev_reg.async_remove_device(device.id)
+        hub.groups.pop(group, None)
+        hub.levels.pop(group, None)
+        hub._save()  # noqa: SLF001
+        _LOGGER.info("Removed C-Bus group %d", group)
+
     async def usb_reset_service(call: ServiceCall) -> None:
         hub = _hub(hass)
         method = call.data.get("method", "ioctl")
@@ -88,6 +107,12 @@ def _register_services(hass: HomeAssistant) -> None:
                 vol.Optional("delay", default=5): vol.Coerce(float),
             }
         ),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "remove_group",
+        remove_group,
+        schema=vol.Schema({vol.Required("group"): vol.All(vol.Coerce(int), vol.Range(0, 254))}),
     )
     hass.services.async_register(DOMAIN, "reconnect", reconnect)
     hass.services.async_register(DOMAIN, "raw_open", raw_open)
