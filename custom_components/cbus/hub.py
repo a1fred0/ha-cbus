@@ -10,7 +10,11 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import (
+    device_registry as dr,
+    entity_registry as er,
+    issue_registry as ir,
+)
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.storage import Store
@@ -88,6 +92,7 @@ class CBusHub:
             on_lighting=self._on_lighting,
             on_connected=self._on_connected,
             on_disconnected=self._on_disconnected,
+            on_status=self._on_status,
             timesync_interval=TIMESYNC_INTERVAL if timesync else 0,
             answer_clock_requests=True,
             port_factory=port_factory,
@@ -230,7 +235,6 @@ class CBusHub:
                 name=name,
                 manufacturer="Clipsal",
                 model="C-Bus lighting group",
-                via_device=self.hub_identifier,
             )
             if area:
                 dev_reg.async_update_device(new_device.id, area_id=area)
@@ -282,6 +286,22 @@ class CBusHub:
         self.entry.async_create_background_task(
             self.hass, self.async_resync(), "cbus-resync"
         )
+
+    @callback
+    def _on_status(self) -> None:
+        issue_id = f"pac_programming_mode_{self.entry.entry_id}"
+        if self.pci.pac_programming_mode:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                issue_id,
+                is_fixable=False,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key="pac_programming_mode",
+            )
+        else:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+        async_dispatcher_send(self.hass, signal_status(self.entry.entry_id))
 
     @callback
     def _on_disconnected(self) -> None:
